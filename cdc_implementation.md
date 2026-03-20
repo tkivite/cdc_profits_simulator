@@ -1,4 +1,4 @@
-# HF Group — CDC Transaction Monitoring Pipeline
+# CDC Transaction Monitoring Pipeline
 
 ## Technical Design Document
 
@@ -10,7 +10,7 @@
 
 This document describes the technical architecture, data design, and implementation
 of the Change Data Capture (CDC) pipeline that monitors transactions, customer
-activity, and account events from the HF Group core banking system (CBS). The
+activity, and account events from the core banking system (CBS). The
 pipeline captures database change events in real time, classifies and persists
 them across a tiered storage architecture, and serves three distinct workloads:
 a live operational dashboard, an analytics dashboard, and a historical query
@@ -663,5 +663,5 @@ completes in milliseconds with no impact on running queries.
 
 ---
 
-_HF Group Technology — Data Engineering_
+_ Technology — Data Engineering_
 _Document maintained by the CDC Platform team_
