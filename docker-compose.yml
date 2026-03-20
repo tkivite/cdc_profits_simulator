@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+
+  # ── Zookeeper ────────────────────────────────────────────────────────────────
+ 
+
+  # ── PostgreSQL with pg_partman + pg_trgm + pg_cron ───────────────────────────
+  # Uses a custom Dockerfile to build pg_partman from source on top of
+  # the official postgres:16 image. pg_trgm and pg_cron are included in
+  # the official image as contrib modules — no extra build needed.
+  
+ 
+  # ── PostgreSQL with pg_partman + pg_trgm + pg_cron ───────────────────────────
+  # Uses a custom Dockerfile to build pg_partman from source on top of
+  # the official postgres:16 image. pg_trgm and pg_cron are included in
+  # the official image as contrib modules — no extra build needed.
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    container_name: hfgroup-postgres
+    restart: unless-stopped
+    # Pass shared_preload_libraries as a runtime argument — NOT in the Dockerfile.
+    # Setting it at build time causes initdb to fail (data directory doesn't exist yet).
+    command: >
+      postgres
+      -c shared_preload_libraries=pg_cron
+      -c cron.database_name=hfgroup_cdc
+    ports:
+      - "54321:5432"
+    environment:
+      POSTGRES_DB: hfgroup_cdc
+      POSTGRES_USER: ${DB_USER:-hfgroup}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-hfgroup_secret}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-hfgroup} -d hfgroup_cdc"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hfgroup-net
+ 
+  # ── CDC Simulator ─────────────────────────────────────────────────────────────
+  cdc-simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: hfgroup-cdc-simulator
+    restart: "no"
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    
+    environment:
+      KAFKA_BROKERS: broker:29092
+      SCENARIO: ${SCENARIO:-all}
+      COUNT: ${COUNT:-200}
+      INTERVAL: ${INTERVAL:-1.0}
+      DAYS: ${DAYS:-3}
+      TXNS_PER_DAY: ${TXNS_PER_DAY:-30}
+      CUSTOMER_ID: ${CUSTOMER_ID:-}
+    networks:
+      - hfgroup-net
+      - aslead-net
+ 
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  postgres-data:
+ 
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  hfgroup-net:
+    driver: bridge
+  aslead-net:
+    external: true   

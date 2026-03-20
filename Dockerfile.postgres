@@ -1,0 +1,34 @@
+FROM postgres:16
+
+LABEL description="PostgreSQL 16 with pg_partman, pg_trgm, pg_cron"
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    postgresql-server-dev-16 \
+    curl \
+    && curl -sSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       | gpg --dearmor > /usr/share/keyrings/postgresql.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] \
+       http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+       > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y postgresql-16-cron \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build pg_partman from source
+# NO_BGW=1 skips the background worker — Spring Boot @Scheduled handles maintenance instead
+RUN git clone --depth 1 --branch v4.7.4 \
+    https://github.com/pgpartman/pg_partman.git /tmp/pg_partman \
+    && cd /tmp/pg_partman \
+    && make NO_BGW=1 \
+    && make install NO_BGW=1 \
+    && rm -rf /tmp/pg_partman
+
+# NOTE: shared_preload_libraries is NOT set here.
+# Setting it during image build causes initdb to fail because the
+# data directory does not exist yet at build time.
+# It is passed as a postgres command argument in docker-compose.yml.
+
+COPY init-extensions.sql /docker-entrypoint-initdb.d/00_extensions.sql

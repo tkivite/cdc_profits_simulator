@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+LABEL maintainer="HF Group Technology"
+LABEL description="CDC Kafka Simulator — mimics Debezium event output"
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy simulator script
+COPY cdc_simulator.py .
+
+# Entrypoint reads all config from environment variables
+# so docker-compose can override any scenario setting
+ENTRYPOINT ["sh", "-c", "\
+  python cdc_simulator.py \
+    --brokers  ${KAFKA_BROKERS:-localhost:9092} \
+    --scenario ${SCENARIO:-all} \
+    --count    ${COUNT:-200} \
+    --interval ${INTERVAL:-1.0} \
+    --days     ${DAYS:-3} \
+    --txns-per-day ${TXNS_PER_DAY:-30} \
+    ${CUSTOMER_ID:+--customer-id $CUSTOMER_ID} \
+"]
