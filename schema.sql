@@ -269,6 +269,46 @@ CREATE TABLE IF NOT EXISTS summary_by_channel_branch (
 
 CREATE INDEX IF NOT EXISTS idx_sum_chbr_date ON summary_by_channel_branch (summary_date);
 
+
+-- =============================================================================
+-- DAILY ACTIVITY SUMMARY TABLES
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS daily_customer_summary (
+    summary_date            DATE            NOT NULL,
+    branch_id               INTEGER,
+    total_creations         BIGINT          NOT NULL DEFAULT 0,
+    total_updates           BIGINT          NOT NULL DEFAULT 0,
+    total_deletions         BIGINT          NOT NULL DEFAULT 0,
+    individual_creations    BIGINT          NOT NULL DEFAULT 0,
+    corporate_creations     BIGINT          NOT NULL DEFAULT 0,
+    status_changes          BIGINT          NOT NULL DEFAULT 0,
+    contact_updates         BIGINT          NOT NULL DEFAULT 0,
+    aml_flag_changes        BIGINT          NOT NULL DEFAULT 0,
+    blacklist_changes       BIGINT          NOT NULL DEFAULT 0,
+    last_updated            TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (summary_date, branch_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_cust_date   ON daily_customer_summary (summary_date);
+CREATE INDEX IF NOT EXISTS idx_daily_cust_branch ON daily_customer_summary (branch_id);
+
+CREATE TABLE IF NOT EXISTS daily_account_summary (
+    summary_date            DATE            NOT NULL,
+    branch_id               INTEGER,
+    total_creations         BIGINT          NOT NULL DEFAULT 0,
+    total_updates           BIGINT          NOT NULL DEFAULT 0,
+    total_deletions         BIGINT          NOT NULL DEFAULT 0,
+    status_activations      BIGINT          NOT NULL DEFAULT 0,
+    status_dormancies       BIGINT          NOT NULL DEFAULT 0,
+    status_blockages        BIGINT          NOT NULL DEFAULT 0,
+    last_updated            TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (summary_date, branch_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_acc_date   ON daily_account_summary (summary_date);
+CREATE INDEX IF NOT EXISTS idx_daily_acc_branch ON daily_account_summary (branch_id);
+
 -- =============================================================================
 -- TIER 1 — HOT TIER (6-hour partitions, 72-hour rolling window)
 -- =============================================================================

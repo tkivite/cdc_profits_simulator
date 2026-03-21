@@ -2,7 +2,7 @@
 
 ## Technical Design Document
 
-**Version 2.0 | March 2026**
+**Version 2.1 | March 2026**
 
 ---
 
@@ -252,6 +252,58 @@ monitoring. A spike in deletion events almost always indicates a bulk
 data operation or test account cleanup rather than legitimate individual
 account closures, and should be investigated.
 
+### 5.6 Daily Activity Summary Recording
+
+Each processor that handles a customer or account lifecycle event also
+calls the `DailyActivitySummaryService` immediately after persisting the
+primary record. This dual-write pattern — identical in structure to the
+transaction summary upserts — ensures that daily summary counters are
+always in sync with the underlying detail tables without requiring any
+scheduled batch aggregation.
+
+The `DailyActivitySummaryService` uses the same `ON CONFLICT DO UPDATE`
+atomic counter pattern as `SummaryService`. Each call increments the
+relevant counter for the current date and branch combination. If no row
+yet exists for that date and branch, the upsert creates one. If one
+already exists, it increments the counter atomically. No read-before-write
+is required, and the operation is safe under concurrent processor
+execution.
+
+**Customer creation recording** classifies each new customer as individual
+(`CUST_TYPE = 1`) or corporate (`CUST_TYPE = 2`) and increments the
+corresponding counter alongside the total creations count. This breakdown
+is extracted directly from the CDC payload at the time of processing,
+requiring no secondary lookup.
+
+**Customer update recording** reuses the `changedFields` string computed
+by the diff logic in `CreateCustomerUpdateActivityRecord`. Rather than
+re-inspecting the before/after payload, the service checks the diff
+output string for the presence of specific field names to classify the
+update: status changes (`CUST_STATUS`, `ENTRY_STATUS`), contact updates
+(`E_MAIL`, `MOBILE_TEL`, `TELEPHONE_1`), AML flag changes (`AML_STATUS`),
+and blacklist changes (`BLACKLISTED_IND`). A single update event may
+increment multiple sub-type counters if multiple tracked field categories
+changed simultaneously.
+
+**Customer deletion recording** increments only the deletion counter
+for the branch recorded in the deleted customer snapshot. No sub-type
+classification is applied to deletions — the event itself is the
+significant signal.
+
+**Account creation recording** increments the branch-level creation
+counter. No sub-type breakdown is applied at creation time as account
+type is derivable from the product reference table.
+
+**Account update recording** inspects the `changedFields` and `newValues`
+strings from the update record to detect status transitions: a new value
+of `1` for `ACC_STATUS` records an activation, `2` records a dormancy,
+and `3` records a blockage. These counters allow the analytics dashboard
+to quantify account health trends across branches without querying the
+full `account_changes` detail table.
+
+**Account deletion recording** follows the same minimal pattern as
+customer deletions — a single counter increment against the branch.
+
 ---
 
 ## 6. Three-Tier Storage Architecture
@@ -357,7 +409,85 @@ where it is observable, alertable, and testable.
 
 ---
 
-## 7. Dead Letter Queue
+## 7. Daily Activity Summary Tables
+
+### 7.1 Purpose
+
+The daily activity summary tables provide a pre-aggregated, branch-segmented
+view of customer and account lifecycle events across each calendar day. They
+serve the analytics dashboard directly, eliminating the need for aggregate
+queries across the `customers`, `accounts`, `customer_changes`,
+`account_changes`, `customer_deletions`, and `account_deletions` detail tables
+at query time.
+
+The design follows the same principle as the transaction summary tables:
+aggregation cost is paid once at write time via atomic upsert, not repeatedly
+at read time. A dashboard query for "today's customer creations by branch"
+returns in microseconds from a table with at most one row per branch per day,
+regardless of how many individual customer records were created.
+
+### 7.2 daily_customer_summary
+
+Tracks customer lifecycle activity per calendar day per branch. The composite
+primary key is `(summary_date, branch_id)`, meaning exactly one row exists per
+branch per day once any customer activity has occurred for that combination.
+
+The table captures three top-level counters — total creations, total updates,
+and total deletions — alongside sub-type breakdowns. Creation events are broken
+down into individual and corporate by inspecting `CUST_TYPE` from the CDC
+payload. Update events are broken down into four categories based on which
+field groups changed: status changes, contact updates, AML flag changes, and
+blacklist changes. A single update event that changes both an email address and
+a status field increments both `contact_updates` and `status_changes`.
+
+Deletion events do not carry sub-type breakdowns. The deletion counter alone
+is the meaningful signal — a non-zero deletion count for any branch on any day
+warrants investigation given the operational rarity of customer deletions in
+a banking system.
+
+### 7.3 daily_account_summary
+
+Tracks account lifecycle activity per calendar day per branch using the same
+composite key structure as `daily_customer_summary`.
+
+The account summary adds a status transition breakdown to update events:
+`status_activations` counts updates where `ACC_STATUS` moved to active,
+`status_dormancies` counts moves to dormant, and `status_blockages` counts
+moves to blocked. These three counters give the operations team immediate
+visibility into account health trends — a spike in dormancies or blockages
+at a specific branch on a specific day is an operationally significant signal
+that is invisible in the raw `account_changes` table without aggregation.
+
+### 7.4 Branch Segmentation
+
+Both summary tables use `branch_id` as the second dimension of the composite
+key rather than a single daily total. This allows the analytics dashboard to
+answer branch-level questions directly: "which branch had the most new
+customers today", "which branch had the most account status changes this week".
+An overall daily total is obtained by summing across all branch rows for a
+given date, which is a trivial GROUP BY query on the already-compact summary
+table.
+
+When a processor cannot determine a branch ID from the CDC payload (the field
+is null or blank in the source record), the row is recorded with a null
+`branch_id`. This row acts as a catch-all for unattributed events and is
+identifiable in dashboard queries by filtering `WHERE branch_id IS NULL`.
+
+### 7.5 Classification Logic
+
+Sub-type classification in both summary tables is derived entirely from data
+already computed by the primary processors — the `changedFields` string from
+update processors and field values from creation and deletion snapshots. No
+additional CBS data is fetched and no secondary database reads are performed.
+This keeps the dual-write pair within a single database transaction and adds
+no latency to the main processing path.
+
+The classification approach is deliberately simple: substring matching on field
+names and new values. This is sufficient because the field names are fixed CBS
+column names and the status code values are stable single-character or
+single-digit codes defined by the CBS data dictionary.
+
+## 8. Dead Letter Queue
 
 ### 7.1 Purpose and Design
 
@@ -420,7 +550,7 @@ it affects downstream consumers.
 
 ---
 
-## 8. CDC Simulator
+## 9. CDC Simulator
 
 The CDC simulator is a Python 3.11 application that produces realistic
 Debezium-format CDC events to all pipeline Kafka topics. It is packaged
@@ -490,7 +620,7 @@ ready to accept producer connections.
 
 ---
 
-## 9. Database Infrastructure
+## 10. Database Infrastructure
 
 ### 9.1 PostgreSQL Docker Image
 
@@ -526,13 +656,13 @@ All Spring service methods that perform writes are annotated
 `@Transactional`. All service methods that only perform reads are annotated
 `@Transactional(readOnly = true)`. This distinction is currently
 informational but becomes operationally significant when a read replica is
-added — the routing datasource (described in Section 10) uses this
+added — the routing datasource (described in Section 11) uses this
 annotation to direct read-only transactions to the replica and write
 transactions to the primary.
 
 ---
 
-## 10. Future Considerations at Scale
+## 11. Future Considerations at Scale
 
 The following capabilities are recommended for consideration when the
 pipeline reaches production scale. They are not required for initial
@@ -607,7 +737,7 @@ benefits from visual tooling.
 
 ---
 
-## 11. Key Design Decisions
+## 12. Key Design Decisions
 
 | Decision                         | Choice                           | Rationale                                                              |
 | -------------------------------- | -------------------------------- | ---------------------------------------------------------------------- |
@@ -625,18 +755,29 @@ benefits from visual tooling.
 | JPA vs JdbcTemplate for hot tier | JdbcTemplate                     | JPA RETURNING id incompatible with partitioned tables                  |
 | Transaction annotations          | @Transactional / readOnly        | Prepares for routing datasource without future code changes            |
 | Simulator connectivity           | Join broker Docker network       | Required to resolve advertised listener hostname                       |
+| Daily summary key design         | (date, branch_id) composite      | Branch-level granularity without extra joins at query time             |
+| Daily summary classification     | Substring match on changedFields | Reuses already-computed diff — no extra reads or CBS lookups           |
+| Daily summary writer             | Same processor, dual-write       | Keeps summaries in sync; no batch job dependency                       |
 
 ---
 
-## 12. Operational Runbook Reference
+## 13. Operational Runbook Reference
 
 ### Running the schema
 
-The complete schema is defined in `schema.sql`. It is idempotent (`CREATE
+The complete schema is defined in `schema.sql`. It now includes all tables
+in dependency order: reference tables, domain tables (customers, accounts),
+change and deletion tracking tables, transaction summary tables, daily
+activity summary tables (daily_customer_summary, daily_account_summary),
+hot tier partitioned table, cold tier partitioned table, DLQ table, and
+statement entries.
+
+### Verifying daily summary data It is idempotent (`CREATE
+
 IF NOT EXISTS`) and safe to re-run. It must be run after
-`init-extensions.sql` has executed (which happens automatically on first
+`init-extensions.sql`has executed (which happens automatically on first
 Docker container start). For a fresh environment, both files run
-automatically via the `docker-entrypoint-initdb.d` mechanism.
+automatically via the`docker-entrypoint-initdb.d` mechanism.
 
 ### Resetting the environment
 
@@ -644,6 +785,18 @@ Stopping containers with `docker compose down -v` wipes all volumes
 including the PostgreSQL data directory. The next `docker compose up`
 will re-run all init scripts and produce a clean database. This is the
 recommended approach during development.
+
+### Verifying daily summary data
+
+The following queries confirm daily summaries are being populated correctly
+after events are processed. Run these after the simulator completes a seed
+and transaction run to verify the dual-write is functioning end-to-end.
+
+Query `daily_customer_summary` and `daily_account_summary` for today's date
+and confirm row counts and counter values are non-zero. A zero total across
+all branches when the simulator has produced events indicates the
+`DailyActivitySummaryService` is not being called from the processors, likely
+due to a missing dependency injection or an exception being swallowed upstream.
 
 ### Checking pipeline health
 
@@ -663,5 +816,5 @@ completes in milliseconds with no impact on running queries.
 
 ---
 
-_ Technology — Data Engineering_
+_Technology — Data Engineering_
 _Document maintained by the CDC Platform team_
